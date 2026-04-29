@@ -1,4 +1,5 @@
 import os
+from datetime import date, timedelta
 
 import pandas as pd
 import snowflake.connector
@@ -6,6 +7,10 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _to_date(col: str = "CREATED_AT") -> str:
+    return f"TO_DATE(TO_TIMESTAMP_NTZ({col}, 9))"
 
 
 def _connect():
@@ -32,127 +37,93 @@ def _query(sql: str) -> pd.DataFrame:
         conn.close()
 
 
-@st.cache_data(ttl=600)
-def get_headline_metrics() -> pd.DataFrame:
-    """Current and prior month: total revenue, orders, items sold."""
-    return _query("""
+def _prior_period(start: date, end: date) -> tuple:
+    days = (end - start).days + 1
+    prior_end = start - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=days - 1)
+    return prior_start, prior_end
+
+
+def _period_metrics(start: date, end: date) -> tuple:
+    df = _query(f"""
         SELECT
-            DATE_TRUNC('month', ORDER_DATE)                                    AS MONTH,
-            SUM(CASE WHEN NOT IS_REFUND THEN REVENUE  ELSE 0 END)             AS TOTAL_REVENUE,
-            COUNT(DISTINCT CASE WHEN NOT IS_REFUND THEN ORDER_ID END)         AS TOTAL_ORDERS,
-            SUM(CASE WHEN NOT IS_REFUND THEN QUANTITY ELSE 0 END)             AS TOTAL_ITEMS
-        FROM REVENUE
-        WHERE DATE_TRUNC('month', ORDER_DATE) IN (
-            DATE_TRUNC('month', CURRENT_DATE()),
-            DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE()))
-        )
+            COALESCE(SUM(PRICE_USD), 0)        AS REVENUE,
+            COUNT(DISTINCT ORDER_ID)            AS ORDERS,
+            COALESCE(SUM(ITEMS_PURCHASED), 0)  AS ITEMS
+        FROM ORDERS
+        WHERE {_to_date()} BETWEEN '{start}' AND '{end}'
+    """)
+    r = df.iloc[0]
+    rev = float(r["REVENUE"])
+    ord_ = int(r["ORDERS"])
+    items = int(r["ITEMS"])
+    aov = rev / ord_ if ord_ else 0.0
+    return rev, ord_, aov, items
+
+
+@st.cache_data(ttl=600)
+def get_headline_metrics(start: date, end: date) -> dict:
+    """Returns {metric: (current_val, prior_val)} for Revenue, Orders, AOV, Items."""
+    prior_start, prior_end = _prior_period(start, end)
+    cur = _period_metrics(start, end)
+    prv = _period_metrics(prior_start, prior_end)
+    return {
+        "revenue": (cur[0], prv[0]),
+        "orders":  (cur[1], prv[1]),
+        "aov":     (cur[2], prv[2]),
+        "items":   (cur[3], prv[3]),
+    }
+
+
+@st.cache_data(ttl=600)
+def get_revenue_trend(start: date, end: date) -> pd.DataFrame:
+    return _query(f"""
+        SELECT
+            DATE_TRUNC('month', {_to_date()})::DATE  AS MONTH,
+            SUM(PRICE_USD)                            AS REVENUE
+        FROM ORDERS
+        WHERE {_to_date()} BETWEEN '{start}' AND '{end}'
         GROUP BY 1
-        ORDER BY 1 DESC
+        ORDER BY 1
     """)
 
 
 @st.cache_data(ttl=600)
-def get_product_revenue_last_quarter() -> pd.DataFrame:
-    """Top 10 products by revenue across each month of the prior quarter."""
-    return _query("""
-        WITH top_products AS (
-            SELECT PRODUCT_NAME
-            FROM REVENUE
-            WHERE ORDER_DATE >= DATE_TRUNC('quarter', DATEADD('quarter', -1, CURRENT_DATE()))
-              AND ORDER_DATE <  DATE_TRUNC('quarter', CURRENT_DATE())
-              AND NOT IS_REFUND
-            GROUP BY PRODUCT_NAME
-            ORDER BY SUM(REVENUE) DESC
-            LIMIT 10
-        )
+def get_top_products(start: date, end: date) -> pd.DataFrame:
+    return _query(f"""
         SELECT
-            r.PRODUCT_NAME,
-            DATE_TRUNC('month', r.ORDER_DATE) AS MONTH,
-            SUM(r.REVENUE)                    AS REVENUE
-        FROM REVENUE r
-        JOIN top_products t ON r.PRODUCT_NAME = t.PRODUCT_NAME
-        WHERE r.ORDER_DATE >= DATE_TRUNC('quarter', DATEADD('quarter', -1, CURRENT_DATE()))
-          AND r.ORDER_DATE <  DATE_TRUNC('quarter', CURRENT_DATE())
-          AND NOT r.IS_REFUND
-        GROUP BY 1, 2
-        ORDER BY 2, 3 DESC
-    """)
-
-
-@st.cache_data(ttl=600)
-def get_bundle_pairs() -> pd.DataFrame:
-    """Top 20 product pairs that appear in the same order."""
-    return _query("""
-        SELECT
-            a.PRODUCT_NAME AS PRODUCT_A,
-            b.PRODUCT_NAME AS PRODUCT_B,
-            COUNT(*)       AS CO_PURCHASE_COUNT
-        FROM REVENUE a
-        JOIN REVENUE b
-          ON a.ORDER_ID      = b.ORDER_ID
-         AND a.PRODUCT_NAME  < b.PRODUCT_NAME
-        WHERE NOT a.IS_REFUND
-          AND NOT b.IS_REFUND
-        GROUP BY 1, 2
-        ORDER BY 3 DESC
-        LIMIT 20
-    """)
-
-
-@st.cache_data(ttl=600)
-def get_refund_rates() -> pd.DataFrame:
-    """Top 10 products by refund rate."""
-    return _query("""
-        SELECT
-            PRODUCT_NAME,
-            COUNT(DISTINCT CASE WHEN NOT IS_REFUND THEN ORDER_ID END) AS TOTAL_ORDERS,
-            COUNT(DISTINCT CASE WHEN     IS_REFUND THEN ORDER_ID END) AS REFUND_COUNT,
-            ROUND(
-                COUNT(DISTINCT CASE WHEN IS_REFUND THEN ORDER_ID END) * 100.0 /
-                NULLIF(COUNT(DISTINCT ORDER_ID), 0),
-            2) AS REFUND_RATE_PCT
-        FROM REVENUE
-        GROUP BY PRODUCT_NAME
-        HAVING COUNT(DISTINCT CASE WHEN NOT IS_REFUND THEN ORDER_ID END) > 0
-        ORDER BY REFUND_RATE_PCT DESC
+            p.PRODUCT_NAME,
+            SUM(oi.PRICE_USD)  AS REVENUE
+        FROM ORDER_ITEMS oi
+        JOIN PRODUCTS p ON oi.PRODUCT_ID = p.PRODUCT_ID
+        WHERE {_to_date('oi.CREATED_AT')} BETWEEN '{start}' AND '{end}'
+        GROUP BY p.PRODUCT_NAME
+        ORDER BY REVENUE DESC
         LIMIT 10
     """)
 
 
 @st.cache_data(ttl=600)
-def get_new_vs_returning() -> pd.DataFrame:
-    """Top 10 products by revenue for new vs returning customers."""
-    return _query("""
-        WITH first_purchase AS (
-            SELECT CUSTOMER_ID, MIN(ORDER_DATE) AS first_date
-            FROM REVENUE
-            WHERE NOT IS_REFUND
-            GROUP BY CUSTOMER_ID
-        ),
-        tagged AS (
-            SELECT
-                r.PRODUCT_NAME,
-                r.REVENUE,
-                CASE WHEN r.ORDER_DATE = f.first_date THEN 'New' ELSE 'Returning' END AS CUSTOMER_TYPE
-            FROM REVENUE r
-            JOIN first_purchase f ON r.CUSTOMER_ID = f.CUSTOMER_ID
-            WHERE NOT r.IS_REFUND
-        ),
-        aggregated AS (
-            SELECT CUSTOMER_TYPE, PRODUCT_NAME, SUM(REVENUE) AS REVENUE
-            FROM tagged
-            GROUP BY CUSTOMER_TYPE, PRODUCT_NAME
-        ),
-        ranked AS (
-            SELECT
-                CUSTOMER_TYPE,
-                PRODUCT_NAME,
-                REVENUE,
-                ROW_NUMBER() OVER (PARTITION BY CUSTOMER_TYPE ORDER BY REVENUE DESC) AS rn
-            FROM aggregated
-        )
-        SELECT CUSTOMER_TYPE, PRODUCT_NAME, REVENUE
-        FROM ranked
-        WHERE rn <= 10
-        ORDER BY CUSTOMER_TYPE, REVENUE DESC
+def get_product_names() -> list:
+    df = _query("SELECT PRODUCT_NAME FROM PRODUCTS ORDER BY PRODUCT_NAME")
+    return df["PRODUCT_NAME"].tolist()
+
+
+@st.cache_data(ttl=600)
+def get_bundle_pairs(product_name: str, start: date, end: date) -> pd.DataFrame:
+    safe = product_name.replace("'", "''")
+    return _query(f"""
+        SELECT
+            p2.PRODUCT_NAME            AS ALSO_BOUGHT,
+            COUNT(DISTINCT a.ORDER_ID) AS ORDER_COUNT
+        FROM ORDER_ITEMS a
+        JOIN PRODUCTS p1 ON a.PRODUCT_ID = p1.PRODUCT_ID
+        JOIN ORDER_ITEMS b
+          ON a.ORDER_ID    = b.ORDER_ID
+         AND a.PRODUCT_ID != b.PRODUCT_ID
+        JOIN PRODUCTS p2 ON b.PRODUCT_ID = p2.PRODUCT_ID
+        WHERE p1.PRODUCT_NAME = '{safe}'
+          AND {_to_date('a.CREATED_AT')} BETWEEN '{start}' AND '{end}'
+        GROUP BY p2.PRODUCT_NAME
+        ORDER BY ORDER_COUNT DESC
     """)
