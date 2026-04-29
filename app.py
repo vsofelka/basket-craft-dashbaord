@@ -85,6 +85,13 @@ try:
     if selected:
         bundle_df = db.get_bundle_pairs(selected, start, end)
         if not bundle_df.empty:
+            fig = px.bar(
+                bundle_df.sort_values("ORDER_COUNT"),
+                x="ORDER_COUNT", y="ALSO_BOUGHT", orientation="h",
+                labels={"ORDER_COUNT": "# of Orders", "ALSO_BOUGHT": ""},
+            )
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, use_container_width=True)
             st.dataframe(
                 bundle_df.rename(columns={"ALSO_BOUGHT": "Also Bought", "ORDER_COUNT": "# of Orders"}),
                 use_container_width=True,
