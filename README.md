@@ -1,6 +1,6 @@
 # BasketCraft — Merchandising Dashboard
 
-**Live app:** _URL to be added once Streamlit Cloud account is active_
+**Live app:** https://basket-craft-dashbaord-ppcdgwe9fnpum3aifavh5x.streamlit.app/
 
 ## Overview
 
