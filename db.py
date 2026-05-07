@@ -8,6 +8,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# On Streamlit Cloud, credentials come from st.secrets rather than .env
+try:
+    for _k, _v in st.secrets.items():
+        os.environ.setdefault(_k, str(_v))
+except Exception:
+    pass
+
 
 def _to_date(col: str = "CREATED_AT") -> str:
     return f"TO_DATE(TO_TIMESTAMP_NTZ({col}, 9))"
