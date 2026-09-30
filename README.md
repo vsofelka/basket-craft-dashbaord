@@ -1,6 +1,8 @@
 # BasketCraft — Merchandising Dashboard
 
-**Live app:** https://basket-craft-dashbaord-ppcdgwe9fnpum3aifavh5x.streamlit.app/
+**Live app:** temporarily offline. The Snowflake trial account behind it expired, and the
+demo is being moved to a saved data snapshot so it stays up. The code and setup below are
+unchanged.
 
 ## Overview
 
